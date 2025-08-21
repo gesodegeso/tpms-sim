@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  tpms-simulator:
+    build: .
+    image: tpms-simulator:latest
+    container_name: tpms-simulator
+    volumes:
+      - ./output:/app/output
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Default command - override with docker-compose run
+    command: ["--help"]
+
+  # Example service for regular vehicles
+  simulate-regular:
+    image: tpms-simulator:latest
+    volumes:
+      - ./output:/app/output
+    command: [
+      "--vehicles", "4",
+      "--wheels", "4", 
+      "--start", "New York, NY",
+      "--end", "Boston, MA",
+      "--speed", "60",
+      "--temp", "75",
+      "--type", "regular",
+      "--output", "/app/output/regular_vehicles.parquet"
+    ]
+
+  # Example service for heavy duty vehicles  
+  simulate-heavy-duty:
+    image: tpms-simulator:latest
+    volumes:
+      - ./output:/app/output
+    command: [
+      "--vehicles", "2",
+      "--wheels", "10",
+      "--start", "Los Angeles, CA", 
+      "--end", "San Francisco, CA",
+      "--speed", "55",
+      "--temp", "80",
+      "--type", "heavy_duty",
+      "--tenant", "trucking_company",
+      "--output", "/app/output/heavy_duty_vehicles.parquet"
+    ]
+
+  # ClickHouse service for testing data import
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-tpms
+    ports:
+      - "8123:8123"  # HTTP interface
+      - "9000:9000"  # Native client
+    volumes:
+      - ./output:/var/lib/clickhouse/user_files
+      - ./clickhouse-init:/docker-entrypoint-initdb.d
+    environment:
+      - CLICKHOUSE_DB=tpms
+      - CLICKHOUSE_USER=tpms_user
+      - CLICKHOUSE_PASSWORD=tpms_password
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+# Networks
+networks:
+  default:
+    name: tpms-network
