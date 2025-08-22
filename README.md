@@ -1,59 +1,76 @@
-# TPMS Sensor Data Simulator v2.1
+# TPMS Sensor Data Simulator v3.0
 
 ## 概要
-このプログラムは、TPMS（タイヤ空気圧監視システム）センサーの出力データをシミュレートし、ClickHouseデータベースに直接インポート可能なParquet形式で出力します。
+このプログラムは、TPMS（タイヤ空気圧監視システム）センサーの出力データをシミュレートし、ClickHouseデータベースに直接インポート可能なParquet形式で出力します。v3.0では、リアルな交通状況のシミュレーションとデータ異常系テストのための機能を追加しました。
 
-**v2.1の新機能:**
-- 🆕 車輪番号体系を業界標準に準拠
-- 🆕 センサーIDプレフィクスを`sensor`に統一
+**v3.0の新機能:**
+- 🚦 **交通イベントシミュレーション**: 渋滞、信号停止、故障、事故を再現
+- 🔧 **データ異常系テスト**: 欠損、異常値、重複などのテストデータ生成
+- ⚠️ **異常マーキング**: 異常データをtrigger列で識別
+
+**v2.1の機能:**
+- 車輪番号体系を業界標準に準拠
+- センサーIDプレフィクスを`sensor`に統一
 
 **v2.0の機能:**
-- 停止中モード（速度0）のサポート - 整備工場や車庫での車両監視に対応
-- GPS出力頻度の最適化 - 圧力/温度レコード2回ごとに1回出力
+- 停止中モード（速度0）のサポート
+- GPS出力頻度の最適化
 
-## 機能
-- 複数車両のセンサーデータを同時生成
-- 実際の道路距離計算（OpenStreetMap使用）
-- 走行による温度上昇のシミュレーション（移動時のみ）
-- 停止中モードでの車両監視データ生成
-- 標準的なVIN形式での車両識別番号生成
-- ClickHouse互換のParquet形式出力
-- GPS出力頻度の調整（データ量最適化）
+## 機能詳細
+
+### 交通イベントシミュレーション
+リアルな走行状況を再現するための各種イベント：
+
+| イベント | 説明 | 影響 |
+|---------|------|------|
+| **渋滞** | 速度が20-30%に低下 | 5-30分継続、温度上昇が緩やか |
+| **信号停止** | 完全停止 | 30秒-2分、温度がわずかに低下 |
+| **タイヤパンク** | タイヤ故障 | 圧力が5-15 PSIに急低下、異常値継続 |
+| **エンジン故障** | エンジン停止 | 完全停止、異常値継続 |
+| **センサー故障** | センサー異常 | ランダムな異常値を送信 |
+| **事故** | 車両事故 | 急激な変化後、データ生成停止 |
+
+### データ異常系テスト機能
+データパイプラインのテストに使用できる各種異常：
+
+| 異常タイプ | 説明 | trigger値 |
+|-----------|------|-----------|
+| **欠損系** | | |
+| 特定センサー欠損 | 特定センサーのデータが欠落 | 1 |
+| 全センサー欠損 | 特定時刻の全データが欠落 | 1 |
+| ランダム欠損 | ランダムにデータが欠落 | 1 |
+| **異常値系** | | |
+| 範囲外の値 | 負値や極端な値（-10, 999 PSI等） | 1 |
+| Null/NaN | Null値やNaN | 1 |
+| **重複系** | | |
+| レコード重複 | 同一レコードが複数存在 | 1 |
+| **時系列異常** | | |
+| タイムスタンプ逆転 | 時刻が過去に戻る | 1 |
+| 未来の日付 | 未来のタイムスタンプ | 1 |
+| ingested_at異常 | ingested_at < read_at | 1 |
+| **その他** | | |
+| 不正なVIN | 無効なVIN番号 | 1 |
+| 不正なセンサーID | 存在しないセンサーID | 1 |
+| データ破損 | 文字化けデータ | 1 |
 
 ## インストール
 
-### 1. リポジトリのクローンまたはダウンロード
-```bash
-git clone <repository-url>
-cd tpms-simulator
-```
+### 1. 依存パッケージのインストール
 
-### 2. Pythonパッケージのインストール
-
-#### オプション A: 最小構成（推奨）
+#### 最小構成（推奨）
 ```bash
 pip install -r requirements-minimal.txt
 ```
-最小限の依存パッケージのみインストール。道路距離は簡易計算（直線距離×1.2）を使用。
 
-#### オプション B: フル機能
+#### フル機能（OpenStreetMap対応）
 ```bash
 pip install -r requirements.txt
 ```
-OpenStreetMapを使用した実際の道路距離計算を含む全機能をインストール。
 
-### 3. 仮想環境の使用（推奨）
+### 2. 仮想環境の使用（推奨）
 ```bash
-# 仮想環境の作成
 python -m venv venv
-
-# アクティベート
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
-
-# パッケージのインストール
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements-minimal.txt
 ```
 
@@ -61,7 +78,7 @@ pip install -r requirements-minimal.txt
 
 ### 基本的な使用例
 
-#### 走行モード（通常の使用）
+#### 通常の走行シミュレーション
 ```bash
 python tpms_simulator.py \
   --vehicles 4 \
@@ -73,32 +90,65 @@ python tpms_simulator.py \
   --type regular
 ```
 
-#### 🆕 停止中モード（整備工場/車庫での監視）
+#### 交通イベント付きシミュレーション
 ```bash
 python tpms_simulator.py \
-  --vehicles 5 \
-  --wheels 4 \
-  --start "Chicago, IL" \
-  --end "Detroit, MI" \
-  --speed 0 \
-  --temp 68 \
-  --type regular \
-  --tenant "maintenance_shop"
+  --vehicles 3 \
+  --wheels 6 \
+  --start "Los Angeles, CA" \
+  --end "San Diego, CA" \
+  --speed 65 \
+  --temp 80 \
+  --type heavy_duty \
+  --enable-traffic-events
 ```
-**注意:** 速度を0に設定すると停止中モードになります。車両は開始地点に留まり、温度変化なし、圧力の微小変動のみをシミュレートします。
 
-#### Heavy Duty車両の長距離輸送
+#### データ異常系テスト（混合モード）
 ```bash
 python tpms_simulator.py \
   --vehicles 2 \
-  --wheels 10 \
-  --start "Los Angeles, CA" \
-  --end "San Francisco, CA" \
+  --wheels 4 \
+  --start "Chicago, IL" \
+  --end "Detroit, MI" \
   --speed 55 \
-  --temp 80 \
+  --temp 70 \
+  --type regular \
+  --enable-data-anomalies \
+  --anomaly-rate 0.1 \
+  --anomaly-mode mixed
+```
+
+#### データ異常系テスト（単一異常タイプ）
+```bash
+python tpms_simulator.py \
+  --vehicles 2 \
+  --wheels 4 \
+  --start "Phoenix, AZ" \
+  --end "Tucson, AZ" \
+  --speed 60 \
+  --temp 95 \
+  --type regular \
+  --enable-data-anomalies \
+  --anomaly-rate 0.05 \
+  --anomaly-mode single
+```
+
+#### 完全なテストシナリオ
+```bash
+python tpms_simulator.py \
+  --vehicles 5 \
+  --wheels 10 \
+  --start "Seattle, WA" \
+  --end "Portland, OR" \
+  --speed 55 \
+  --temp 65 \
   --type heavy_duty \
-  --tenant "logistics_company" \
-  --interval 10
+  --tenant "test_company" \
+  --interval 3 \
+  --enable-traffic-events \
+  --enable-data-anomalies \
+  --anomaly-rate 0.08 \
+  --anomaly-mode mixed
 ```
 
 ### パラメータ詳細
@@ -110,7 +160,7 @@ python tpms_simulator.py \
 | `--wheels` | 車輪数（4, 6, 8, 10） | `4` |
 | `--start` | 出発地点 | `"Chicago, IL"` |
 | `--end` | 到着地点 | `"Detroit, MI"` |
-| `--speed` | 平均速度（mph）<br>**0で停止中モード** | `60` または `0` |
+| `--speed` | 平均速度（mph）、0で停止中モード | `60` |
 | `--temp` | 平均外気温（華氏） | `75` |
 | `--type` | 車両タイプ | `regular` or `heavy_duty` |
 
@@ -120,40 +170,29 @@ python tpms_simulator.py \
 | `--tenant` | テナント名 | 自動生成 |
 | `--interval` | データ更新間隔（分） | `5` |
 | `--output` | 出力ファイル名 | 自動生成 |
+| **交通イベント** | | |
+| `--enable-traffic-events` | 交通イベント有効化 | 無効 |
+| **データ異常** | | |
+| `--enable-data-anomalies` | データ異常生成有効化 | 無効 |
+| `--anomaly-rate` | 異常発生率（0-1） | `0.05` |
+| `--anomaly-mode` | 異常モード | `mixed` |
 
-## 動作モード
+### 異常モードの選択
 
-### 走行モード（速度 > 0）
-- 車両は開始地点から終了地点へ移動
-- タイヤ温度は走行により上昇（最大+10°F）
-- 圧力は±0.5 PSIの範囲で変動
-- GPSは実際の移動経路を記録
-
-### 🆕 停止中モード（速度 = 0）
-- 車両は開始地点に留まる
-- タイヤ温度は外気温のまま（変化なし）
-- 圧力は±0.2 PSIの微小変動のみ
-- データ生成期間は法定速度での移動時間を使用
-  - 州内移動: 55 mph
-  - 州間移動: 65 mph
-- 用途: 整備工場、車庫、駐車場での車両監視
+- **`mixed`**: 様々な種類の異常をランダムに混在させる
+- **`single`**: 1種類の異常のみを生成（テスト用）
 
 ## データ出力仕様
 
-### GPS出力頻度
-- 🆕 圧力/温度レコード2回ごとに1回GPS位置情報を出力
-- 例（5分間隔の場合）:
-  - 0分: 圧力・温度
-  - 5分: 圧力・温度
-  - 10分: 圧力・温度・**GPS**
-  - 15分: 圧力・温度
-  - 20分: 圧力・温度・**GPS**
+### trigger列の値
+- **空文字列("")**: 正常データ
+- **"1"**: 異常データ（交通イベントまたはデータ異常）
 
 ### 車輪番号の割り当て
 - **4輪**: 11(左前), 14(右前), 21(左後), 24(右後)
 - **6輪**: 11(左前), 14(右前), 21(後左外), 22(後左内), 23(後右内), 24(後右外)
 - **8輪**: 11(左前), 14(右前), 21(2軸目左), 24(2軸目右), 31(3軸目左外), 32(3軸目左内), 33(3軸目右内), 34(3軸目右外)
-- **10輪**: 11(左前), 14(右前), 21(2軸目左外), 22(2軸目左内), 23(2軸目右内), 24(2軸目右外), 31(3軸目左外), 32(3軸目左内), 33(3軸目右内), 34(3軸目右外)
+- **10輪**: 11(左前), 14(右前), 21-24(2軸目), 31-34(3軸目)
 
 ### センサーIDの形式
 - タイヤ圧力: `sensor{位置番号}_pressure`
@@ -161,65 +200,9 @@ python tpms_simulator.py \
 - 緯度: `latitude`
 - 経度: `longitude`
 
-## データフォーマット
-
-### 出力カラム
-| カラム名 | データ型 | 説明 |
-|---------|---------|------|
-| tenant | String | テナント識別子 |
-| sensor_id | String | センサーID |
-| vin | String | 17桁の車両識別番号 |
-| read_at | DateTime | 読み取り時刻 |
-| trigger | String | トリガー（空文字） |
-| reading | Float64 | 測定値 |
-| ingested_at | DateTime | 取り込み時刻（read_at + 2分） |
-
-### 圧力値の範囲
-- **普通車**: 31-35 PSI
-  - 走行中: ±0.5 PSI変動
-  - 停止中: ±0.2 PSI変動
-- **Heavy Duty**: 85-120 PSI
-  - 走行中: ±0.5 PSI変動
-  - 停止中: ±0.2 PSI変動
-
-### 温度値の特性
-- **走行モード**: 外気温から最大+10°F上昇
-- **停止中モード**: 外気温±1°F（変化なし）
-
-## ClickHouseへのインポート
-
-```sql
--- テーブルへのインポート
-INSERT INTO v1__sensor_reading 
-SELECT * FROM file('path/to/tpms_data_*.parquet', 'Parquet');
-
--- データの確認
-SELECT 
-    sensor_id,
-    count() as record_count,
-    avg(reading) as avg_reading
-FROM v1__sensor_reading
-GROUP BY sensor_id
-ORDER BY sensor_id;
-```
-
 ## 使用例
 
-### 例1: 整備工場での24時間監視
-```bash
-python tpms_simulator.py \
-  --vehicles 10 \
-  --wheels 4 \
-  --start "Denver, CO" \
-  --end "Salt Lake City, UT" \
-  --speed 0 \
-  --temp 65 \
-  --type regular \
-  --tenant "denver_maintenance" \
-  --interval 30  # 30分ごとの記録
-```
-
-### 例2: 配送トラックの都市内走行
+### 例1: 都市部の配送シミュレーション（信号多数）
 ```bash
 python tpms_simulator.py \
   --vehicles 3 \
@@ -230,85 +213,145 @@ python tpms_simulator.py \
   --temp 72 \
   --type heavy_duty \
   --tenant "city_delivery" \
-  --interval 2  # 頻繁な更新
+  --interval 2 \
+  --enable-traffic-events
 ```
 
-### 例3: 長距離トラック輸送
+### 例2: データパイプラインの異常系テスト
+```bash
+# 欠損データのテスト
+python tpms_simulator.py \
+  --vehicles 1 \
+  --wheels 4 \
+  --start "Denver, CO" \
+  --end "Boulder, CO" \
+  --speed 45 \
+  --temp 60 \
+  --type regular \
+  --enable-data-anomalies \
+  --anomaly-rate 0.15 \
+  --anomaly-mode single
+```
+
+### 例3: 長距離輸送の完全シミュレーション
 ```bash
 python tpms_simulator.py \
-  --vehicles 5 \
+  --vehicles 10 \
   --wheels 10 \
-  --start "Seattle, WA" \
-  --end "Portland, OR" \
-  --speed 55 \
-  --temp 60 \
+  --start "Los Angeles, CA" \
+  --end "Las Vegas, NV" \
+  --speed 65 \
+  --temp 85 \
   --type heavy_duty \
-  --tenant "interstate_logistics"
+  --tenant "logistics_co" \
+  --enable-traffic-events \
+  --enable-data-anomalies \
+  --anomaly-rate 0.03
+```
+
+## ClickHouseでのデータ検証
+
+### 異常データの確認
+```sql
+-- 異常データの統計
+SELECT 
+    trigger,
+    COUNT(*) as count,
+    COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as percentage
+FROM v1__sensor_reading
+GROUP BY trigger
+ORDER BY trigger;
+
+-- センサー別の異常率
+SELECT 
+    sensor_id,
+    COUNT(CASE WHEN trigger = '1' THEN 1 END) as anomaly_count,
+    COUNT(*) as total_count,
+    COUNT(CASE WHEN trigger = '1' THEN 1 END) * 100.0 / COUNT(*) as anomaly_rate
+FROM v1__sensor_reading
+WHERE sensor_id LIKE 'sensor%'
+GROUP BY sensor_id
+ORDER BY anomaly_rate DESC;
+```
+
+### 異常値の検出
+```sql
+-- 範囲外の圧力値
+SELECT *
+FROM v1__sensor_reading
+WHERE sensor_id LIKE '%pressure'
+  AND (reading < 0 OR reading > 200)
+ORDER BY read_at;
+
+-- タイムスタンプ異常
+SELECT *
+FROM v1__sensor_reading
+WHERE ingested_at < read_at
+   OR read_at > now()
+ORDER BY read_at;
 ```
 
 ## トラブルシューティング
 
-### "Could not find coordinates" エラー
-- 地点名が正しいか確認
-- 米国内の地点であることを確認
-- インターネット接続を確認
+### 交通イベントが発生しない
+- `--enable-traffic-events`フラグが設定されているか確認
+- 停止中モード（速度0）では交通イベントは発生しません
 
-### OSMnx関連のエラー
-- `requirements.txt`でフル機能版をインストール
-- または`requirements-minimal.txt`で簡易計算モードを使用
+### 異常データが生成されない
+- `--enable-data-anomalies`フラグが設定されているか確認
+- `--anomaly-rate`の値を確認（0.05 = 5%）
 
-### メモリ不足エラー
-- 車両数を減らして実行
-- または仮想メモリを増やす: `ulimit -v unlimited`
-
-### 停止中モードでデータが生成されない
-- 速度が正確に0に設定されているか確認
-- 開始地点と終了地点が異なることを確認（距離計算のため）
+### メモリ不足
+- 車両数を減らす
+- データ更新間隔を増やす（`--interval 10`）
 
 ## Python実行例
 
 ```python
 from tpms_simulator import TPMSSimulator
 
-# 停止中モードのシミュレータ
-stationary_sim = TPMSSimulator(
+# 交通イベントと異常データを含むシミュレーション
+simulator = TPMSSimulator(
     num_vehicles=3,
     num_wheels=4,
-    start_location="Phoenix, AZ",
-    end_location="Tucson, AZ",
-    avg_speed_mph=0,  # 停止中モード
-    avg_temp_f=95,
+    start_location="San Francisco, CA",
+    end_location="San Jose, CA",
+    avg_speed_mph=55,
+    avg_temp_f=68,
     vehicle_type="regular",
-    tenant="repair_shop"
+    tenant="test_fleet",
+    enable_traffic_events=True,
+    enable_data_anomalies=True,
+    anomaly_rate=0.1,
+    anomaly_mode='mixed'
 )
 
 # データ生成と保存
-df = stationary_sim.generate_dataset()
-stationary_sim.save_to_parquet(df, "stationary_monitoring.parquet")
+df = simulator.generate_dataset()
+simulator.save_to_parquet(df, "test_data.parquet")
+
+# 異常データの確認
+anomalies = df[df['trigger'] == '1']
+print(f"異常データ: {len(anomalies)} / {len(df)} ({len(anomalies)/len(df)*100:.1f}%)")
 ```
 
 ## バージョン履歴
 
-### v2.1 (Current)
-- 車輪番号体系を業界標準に準拠（前輪右: 14、4輪車後輪右: 24など）
-- センサーIDプレフィクスを`tire`から`sensor`に変更
-- 車輪番号体系の詳細ドキュメント追加
+### v3.0 (Current)
+- 交通イベントシミュレーション（渋滞、信号、故障、事故）
+- データ異常系テスト機能（欠損、異常値、重複等）
+- trigger列による異常データのマーキング
+
+### v2.1
+- 車輪番号体系を業界標準に準拠
+- センサーIDプレフィクスを`sensor`に変更
 
 ### v2.0
 - 停止中モード（速度0）のサポート
-- GPS出力頻度の最適化（2:1比率）
-- 停止中の圧力変動を現実的に調整
+- GPS出力頻度の最適化
 
 ### v1.0
 - 初期リリース
-- 基本的なTPMSデータシミュレーション
-- OpenStreetMap統合
 
 ## ライセンス
 このプログラムはデモンストレーション目的で提供されています。
-
-## サポート
-問題が発生した場合は、以下を確認してください：
-1. Pythonバージョン3.7以上
-2. 必要なパッケージがインストールされている
-3. インターネット接続が利用可能（ジオコーディング用）

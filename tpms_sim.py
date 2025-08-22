@@ -2,14 +2,15 @@
 """
 TPMS (Tire Pressure Monitoring System) Sensor Data Simulator
 Generates simulated tire pressure and temperature data in Parquet format for ClickHouse import
-Version 2.1 - Updated wheel numbering system and sensor ID prefix
+Version 3.0 - Added traffic events and data anomaly simulation for testing
 """
 
 import argparse
 import random
 import string
+import math
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 import pandas as pd
 import numpy as np
 from geopy.geocoders import Nominatim
@@ -26,11 +27,131 @@ except ImportError:
     OSMNX_AVAILABLE = False
     print("Warning: OSMnx not available. Will use simplified distance calculation.")
 
+class TrafficEvent:
+    """Class to represent traffic events"""
+    def __init__(self, event_type: str, start_time: datetime, duration_min: int, severity: float = 1.0):
+        self.event_type = event_type  # 'congestion', 'signal', 'breakdown', 'accident'
+        self.start_time = start_time
+        self.duration_min = duration_min
+        self.end_time = start_time + timedelta(minutes=duration_min)
+        self.severity = severity  # 0-1 scale for impact severity
+
+class AnomalyGenerator:
+    """Class to generate various data anomalies for testing"""
+    
+    @staticmethod
+    def missing_sensor(records: List[Dict], sensor_id: str) -> List[Dict]:
+        """Remove specific sensor data"""
+        return [r for r in records if r['sensor_id'] != sensor_id]
+    
+    @staticmethod
+    def missing_all_sensors(records: List[Dict], timestamp: datetime) -> List[Dict]:
+        """Remove all sensor data at specific timestamp"""
+        return [r for r in records if r['read_at'] != timestamp]
+    
+    @staticmethod
+    def random_missing(records: List[Dict], rate: float) -> List[Dict]:
+        """Randomly remove records"""
+        return [r for r in records if random.random() > rate]
+    
+    @staticmethod
+    def out_of_range(record: Dict) -> Dict:
+        """Generate out-of-range values"""
+        if 'pressure' in record['sensor_id']:
+            # Generate extreme pressure values
+            record['reading'] = random.choice([-10, 0, 999, 1500])
+        elif 'temperature' in record['sensor_id']:
+            # Generate extreme temperature values
+            record['reading'] = random.choice([-50, 0, 300, 500])
+        elif record['sensor_id'] == 'latitude':
+            record['reading'] = random.choice([-999, 999])
+        elif record['sensor_id'] == 'longitude':
+            record['reading'] = random.choice([-999, 999])
+        record['trigger'] = '1'  # Mark as anomaly
+        return record
+    
+    @staticmethod
+    def null_value(record: Dict) -> Dict:
+        """Generate null/NaN values"""
+        record['reading'] = None  # Will become NaN in DataFrame
+        record['trigger'] = '1'
+        return record
+    
+    @staticmethod
+    def duplicate_record(records: List[Dict], record_index: int) -> List[Dict]:
+        """Duplicate a specific record"""
+        if 0 <= record_index < len(records):
+            duplicate = records[record_index].copy()
+            duplicate['trigger'] = '1'
+            records.insert(record_index + 1, duplicate)
+        return records
+    
+    @staticmethod
+    def timestamp_reversal(record: Dict, prev_timestamp: datetime) -> Dict:
+        """Create timestamp reversal"""
+        record['read_at'] = prev_timestamp - timedelta(minutes=random.randint(1, 10))
+        record['trigger'] = '1'
+        return record
+    
+    @staticmethod
+    def future_timestamp(record: Dict) -> Dict:
+        """Create future timestamp"""
+        record['read_at'] = datetime.now() + timedelta(days=random.randint(1, 365))
+        record['trigger'] = '1'
+        return record
+    
+    @staticmethod
+    def ingested_before_read(record: Dict) -> Dict:
+        """Make ingested_at before read_at"""
+        record['ingested_at'] = record['read_at'] - timedelta(minutes=random.randint(1, 60))
+        record['trigger'] = '1'
+        return record
+    
+    @staticmethod
+    def invalid_vin(record: Dict) -> Dict:
+        """Generate invalid VIN"""
+        record['vin'] = random.choice([
+            'INVALID_VIN_123',
+            '00000000000000000',
+            'XXXXXXXXXXXXXXXXX',
+            ''.join(random.choices('!@#$%^&*()', k=17))
+        ])
+        record['trigger'] = '1'
+        return record
+    
+    @staticmethod
+    def invalid_sensor_id(record: Dict) -> Dict:
+        """Generate invalid sensor ID"""
+        record['sensor_id'] = random.choice([
+            'invalid_sensor',
+            'sensor99_unknown',
+            'corrupted_#$%',
+            ''
+        ])
+        record['trigger'] = '1'
+        return record
+    
+    @staticmethod
+    def corrupted_data(record: Dict) -> Dict:
+        """Generate corrupted/garbled data"""
+        if random.random() < 0.5:
+            # Corrupt sensor_id
+            record['sensor_id'] = ''.join(random.choices('!@#$%^&*()_+', k=10))
+        else:
+            # Corrupt tenant
+            record['tenant'] = ''.join(random.choices('!@#$%^&*()_+', k=10))
+        record['trigger'] = '1'
+        return record
+
 class TPMSSimulator:
     def __init__(self, num_vehicles: int, num_wheels: int, start_location: str, 
                  end_location: str, avg_speed_mph: float, avg_temp_f: float, 
                  vehicle_type: str, tenant: Optional[str] = None, 
-                 update_interval_min: int = 5):
+                 update_interval_min: int = 5,
+                 enable_traffic_events: bool = False,
+                 enable_data_anomalies: bool = False,
+                 anomaly_rate: float = 0.05,
+                 anomaly_mode: str = 'mixed'):
         """
         Initialize TPMS Simulator
         
@@ -44,6 +165,10 @@ class TPMSSimulator:
             vehicle_type: Type of vehicle ("regular" or "heavy_duty")
             tenant: Tenant name (optional)
             update_interval_min: Data update interval in minutes (default: 5)
+            enable_traffic_events: Enable traffic event simulation
+            enable_data_anomalies: Enable data anomaly generation
+            anomaly_rate: Rate of anomaly occurrence (0-1)
+            anomaly_mode: 'mixed' or 'single' anomaly types
         """
         self.num_vehicles = num_vehicles
         self.num_wheels = num_wheels
@@ -55,6 +180,10 @@ class TPMSSimulator:
         self.tenant = tenant or f"test{random.randint(1000000000, 9999999999)}"
         self.update_interval_min = update_interval_min
         self.stationary_mode = (avg_speed_mph == 0)
+        self.enable_traffic_events = enable_traffic_events
+        self.enable_data_anomalies = enable_data_anomalies
+        self.anomaly_rate = anomaly_rate
+        self.anomaly_mode = anomaly_mode
         
         # Validate inputs
         if num_wheels not in [4, 6, 8, 10]:
@@ -63,6 +192,8 @@ class TPMSSimulator:
             raise ValueError("Number of wheels must be even")
         if vehicle_type.lower() not in ["regular", "heavy_duty", "heavy duty"]:
             raise ValueError("Vehicle type must be 'regular' or 'heavy_duty'")
+        if anomaly_mode not in ['mixed', 'single']:
+            raise ValueError("Anomaly mode must be 'mixed' or 'single'")
         
         # Set pressure ranges based on vehicle type
         if self.vehicle_type == "regular":
@@ -91,6 +222,19 @@ class TPMSSimulator:
         
         # Generate VINs for all vehicles
         self.vins = [self._generate_vin() for _ in range(num_vehicles)]
+        
+        # Initialize anomaly generator
+        self.anomaly_gen = AnomalyGenerator()
+        
+        # Select anomaly types for single mode
+        if self.anomaly_mode == 'single' and self.enable_data_anomalies:
+            self.selected_anomaly = random.choice([
+                'missing_sensor', 'missing_all', 'random_missing',
+                'out_of_range', 'null_value', 'duplicate',
+                'timestamp_reversal', 'future_timestamp', 'ingested_before_read',
+                'invalid_vin', 'invalid_sensor_id', 'corrupted_data'
+            ])
+            print(f"Single anomaly mode selected: {self.selected_anomaly}")
     
     def _get_legal_speed(self) -> float:
         """Get default legal speed based on start and end locations"""
@@ -193,6 +337,199 @@ class TPMSSimulator:
             #          3rd-L-outer(31), 3rd-L-inner(32), 3rd-R-inner(33), 3rd-R-outer(34)
             return ['11', '14', '21', '22', '23', '24', '31', '32', '33', '34']
     
+    def _generate_traffic_events(self, trip_duration_hours: float, start_time: datetime) -> List[TrafficEvent]:
+        """Generate random traffic events during the trip"""
+        events = []
+        
+        if not self.enable_traffic_events or self.stationary_mode:
+            return events
+        
+        trip_duration_min = trip_duration_hours * 60
+        
+        # Generate congestion events (1-3 per trip)
+        num_congestions = random.randint(1, 3)
+        for _ in range(num_congestions):
+            event_start = start_time + timedelta(minutes=random.uniform(10, trip_duration_min - 30))
+            duration = random.randint(5, 30)  # 5-30 minutes
+            events.append(TrafficEvent('congestion', event_start, duration, severity=random.uniform(0.2, 0.3)))
+        
+        # Generate signal stops (based on trip duration)
+        num_signals = int(trip_duration_min / random.randint(5, 10))  # Every 5-10 minutes
+        for _ in range(num_signals):
+            event_start = start_time + timedelta(minutes=random.uniform(2, trip_duration_min - 2))
+            duration = random.uniform(0.5, 2)  # 30 seconds to 2 minutes
+            events.append(TrafficEvent('signal', event_start, duration, severity=1.0))
+        
+        # Generate breakdown (10% chance)
+        if random.random() < 0.1:
+            event_start = start_time + timedelta(minutes=random.uniform(20, trip_duration_min - 20))
+            duration = random.randint(10, 30)  # 10-30 minutes
+            breakdown_type = random.choice(['tire_puncture', 'engine_failure', 'sensor_failure'])
+            events.append(TrafficEvent(f'breakdown_{breakdown_type}', event_start, duration, severity=1.0))
+        
+        # Generate accident (5% chance)
+        if random.random() < 0.05:
+            event_start = start_time + timedelta(minutes=random.uniform(10, trip_duration_min - 10))
+            events.append(TrafficEvent('accident', event_start, 999, severity=1.0))  # Trip ends
+        
+        # Sort events by start time
+        events.sort(key=lambda x: x.start_time)
+        
+        return events
+    
+    def _apply_traffic_event(self, event: TrafficEvent, current_speed: float, 
+                            wheel_pressures: Dict, wheel_temps: Dict) -> Tuple[float, Dict, Dict, bool]:
+        """Apply traffic event effects"""
+        continue_trip = True
+        
+        if 'congestion' in event.event_type:
+            # Reduce speed to 20-30% of normal
+            current_speed = self.avg_speed_mph * event.severity
+            
+        elif 'signal' in event.event_type:
+            # Complete stop
+            current_speed = 0
+            # Temperature slightly decreases during stop
+            for pos in wheel_temps:
+                wheel_temps[pos] -= random.uniform(0.5, 1.5)
+                
+        elif 'breakdown_tire_puncture' in event.event_type:
+            # Random tire loses pressure rapidly
+            affected_wheel = random.choice(list(wheel_pressures.keys()))
+            wheel_pressures[affected_wheel] = random.uniform(5, 15)  # Severe pressure loss
+            current_speed = 0
+            
+        elif 'breakdown_engine_failure' in event.event_type:
+            # Complete stop
+            current_speed = 0
+            
+        elif 'breakdown_sensor_failure' in event.event_type:
+            # Sensor sends erratic data (handled in anomaly generation)
+            pass
+            
+        elif 'accident' in event.event_type:
+            # Sudden changes and trip termination
+            for pos in wheel_pressures:
+                wheel_pressures[pos] += random.uniform(-10, 10)  # Erratic pressure changes
+            for pos in wheel_temps:
+                wheel_temps[pos] += random.uniform(-5, 15)  # Temperature spikes
+            current_speed = 0
+            continue_trip = False  # Stop data generation
+        
+        return current_speed, wheel_pressures, wheel_temps, continue_trip
+    
+    def _apply_data_anomalies(self, records: List[Dict]) -> List[Dict]:
+        """Apply data anomalies to records"""
+        if not self.enable_data_anomalies or len(records) == 0:
+            return records
+        
+        num_anomalies = int(len(records) * self.anomaly_rate)
+        
+        if self.anomaly_mode == 'single':
+            # Apply only one type of anomaly
+            anomaly_type = self.selected_anomaly
+            
+            if anomaly_type == 'missing_sensor':
+                # Remove random sensor completely
+                sensor_ids = list(set([r['sensor_id'] for r in records]))
+                if sensor_ids:
+                    sensor_to_remove = random.choice(sensor_ids)
+                    records = self.anomaly_gen.missing_sensor(records, sensor_to_remove)
+                    
+            elif anomaly_type == 'missing_all':
+                # Remove all sensors at random timestamps
+                timestamps = list(set([r['read_at'] for r in records]))
+                for _ in range(min(num_anomalies, len(timestamps) // 10)):
+                    if timestamps:
+                        ts_to_remove = random.choice(timestamps)
+                        records = self.anomaly_gen.missing_all_sensors(records, ts_to_remove)
+                        
+            elif anomaly_type == 'random_missing':
+                records = self.anomaly_gen.random_missing(records, self.anomaly_rate)
+                
+            else:
+                # Apply value-based anomalies
+                for _ in range(num_anomalies):
+                    if records:
+                        idx = random.randint(0, len(records) - 1)
+                        if anomaly_type == 'out_of_range':
+                            records[idx] = self.anomaly_gen.out_of_range(records[idx])
+                        elif anomaly_type == 'null_value':
+                            records[idx] = self.anomaly_gen.null_value(records[idx])
+                        elif anomaly_type == 'duplicate':
+                            records = self.anomaly_gen.duplicate_record(records, idx)
+                        elif anomaly_type == 'timestamp_reversal' and idx > 0:
+                            records[idx] = self.anomaly_gen.timestamp_reversal(
+                                records[idx], records[idx-1]['read_at'])
+                        elif anomaly_type == 'future_timestamp':
+                            records[idx] = self.anomaly_gen.future_timestamp(records[idx])
+                        elif anomaly_type == 'ingested_before_read':
+                            records[idx] = self.anomaly_gen.ingested_before_read(records[idx])
+                        elif anomaly_type == 'invalid_vin':
+                            records[idx] = self.anomaly_gen.invalid_vin(records[idx])
+                        elif anomaly_type == 'invalid_sensor_id':
+                            records[idx] = self.anomaly_gen.invalid_sensor_id(records[idx])
+                        elif anomaly_type == 'corrupted_data':
+                            records[idx] = self.anomaly_gen.corrupted_data(records[idx])
+        else:
+            # Mixed mode - apply various anomalies randomly
+            anomaly_types = [
+                'missing_sensor', 'random_missing', 'out_of_range', 'null_value',
+                'duplicate', 'timestamp_reversal', 'future_timestamp',
+                'ingested_before_read', 'invalid_vin', 'invalid_sensor_id', 'corrupted_data'
+            ]
+            
+            for _ in range(num_anomalies):
+                if records:
+                    anomaly_type = random.choice(anomaly_types)
+                    idx = random.randint(0, len(records) - 1)
+                    
+                    if anomaly_type == 'missing_sensor':
+                        sensor_ids = list(set([r['sensor_id'] for r in records]))
+                        if sensor_ids:
+                            sensor_to_remove = random.choice(sensor_ids)
+                            # Remove only a few instances
+                            for i in range(min(5, len(records))):
+                                random_idx = random.randint(0, len(records) - 1)
+                                if records[random_idx]['sensor_id'] == sensor_to_remove:
+                                    records[random_idx]['trigger'] = '1'
+                                    records.pop(random_idx)
+                                    
+                    elif anomaly_type == 'random_missing':
+                        if random.random() < 0.5:
+                            records[idx]['trigger'] = '1'
+                            records.pop(idx)
+                            
+                    elif anomaly_type == 'out_of_range':
+                        records[idx] = self.anomaly_gen.out_of_range(records[idx])
+                        
+                    elif anomaly_type == 'null_value':
+                        records[idx] = self.anomaly_gen.null_value(records[idx])
+                        
+                    elif anomaly_type == 'duplicate':
+                        records = self.anomaly_gen.duplicate_record(records, idx)
+                        
+                    elif anomaly_type == 'timestamp_reversal' and idx > 0:
+                        records[idx] = self.anomaly_gen.timestamp_reversal(
+                            records[idx], records[idx-1]['read_at'])
+                            
+                    elif anomaly_type == 'future_timestamp':
+                        records[idx] = self.anomaly_gen.future_timestamp(records[idx])
+                        
+                    elif anomaly_type == 'ingested_before_read':
+                        records[idx] = self.anomaly_gen.ingested_before_read(records[idx])
+                        
+                    elif anomaly_type == 'invalid_vin':
+                        records[idx] = self.anomaly_gen.invalid_vin(records[idx])
+                        
+                    elif anomaly_type == 'invalid_sensor_id':
+                        records[idx] = self.anomaly_gen.invalid_sensor_id(records[idx])
+                        
+                    elif anomaly_type == 'corrupted_data':
+                        records[idx] = self.anomaly_gen.corrupted_data(records[idx])
+        
+        return records
+    
     def _generate_sensor_data(self, vin: str, start_time: datetime) -> List[Dict]:
         """Generate sensor data for one vehicle"""
         records = []
@@ -217,6 +554,9 @@ class TPMSSimulator:
         trip_duration_min = self.trip_duration_hours * 60
         num_points = int(trip_duration_min / self.update_interval_min) + 1
         
+        # Generate traffic events
+        traffic_events = self._generate_traffic_events(self.trip_duration_hours, start_time)
+        
         # Generate interpolated coordinates for the trip (or fixed for stationary)
         if self.stationary_mode:
             # Vehicle stays at start location
@@ -229,10 +569,24 @@ class TPMSSimulator:
         
         current_time = start_time
         gps_output_counter = 0  # Counter for GPS output frequency
+        current_speed = self.avg_speed_mph
+        continue_trip = True
         
         for i in range(num_points):
+            if not continue_trip:
+                break  # Stop generating data after accident
+                
             read_at = current_time
             ingested_at = current_time + timedelta(minutes=2)
+            
+            # Check for active traffic events
+            active_events = [e for e in traffic_events if e.start_time <= read_at < e.end_time]
+            for event in active_events:
+                current_speed, wheel_pressures, wheel_temps, continue_trip = \
+                    self._apply_traffic_event(event, current_speed, wheel_pressures, wheel_temps)
+                if not continue_trip:
+                    print(f"Vehicle {vin}: Trip ended due to accident at {read_at}")
+                    break
             
             # Current position
             current_lat = lat_points[i]
@@ -243,6 +597,11 @@ class TPMSSimulator:
             
             # Generate tire pressure and temperature records
             for pos in wheel_positions:
+                trigger_value = ''  # Default: no anomaly
+                
+                # Check if there's a breakdown affecting this sensor
+                sensor_failure = any('sensor_failure' in e.event_type for e in active_events)
+                
                 if self.stationary_mode:
                     # Stationary mode: minimal pressure variation, no temperature change
                     pressure_variation = random.uniform(-0.2, 0.2)  # Smaller variation
@@ -255,24 +614,37 @@ class TPMSSimulator:
                     wheel_temps[pos] = self.avg_temp_f + random.uniform(-1, 1)
                 else:
                     # Moving mode: normal variations
-                    # Simulate pressure changes (small variations)
-                    pressure_variation = random.uniform(-0.5, 0.5)
-                    wheel_pressures[pos] = max(
-                        self.pressure_range[0], 
-                        min(self.pressure_range[1], 
-                            wheel_pressures[pos] + pressure_variation)
-                    )
-                    
-                    # Simulate temperature increase during driving
-                    # Temperature rises more at the beginning and stabilizes
-                    temp_rise = 10 * (1 - np.exp(-3 * progress))  # Asymptotic rise to ~10°F
-                    temp_variation = random.uniform(-1, 1)
-                    wheel_temps[pos] = self.avg_temp_f + temp_rise + temp_variation
-                    
-                    # Add noise to rear wheels (they typically run slightly hotter)
-                    # Check if it's a rear wheel (2nd or 3rd axle)
-                    if pos[0] in ['2', '3']:  # 2nd and 3rd axle wheels
-                        wheel_temps[pos] += random.uniform(0, 2)
+                    # Adjust based on current speed
+                    if current_speed > 0:
+                        # Simulate pressure changes (small variations)
+                        pressure_variation = random.uniform(-0.5, 0.5)
+                        wheel_pressures[pos] = max(
+                            self.pressure_range[0], 
+                            min(self.pressure_range[1], 
+                                wheel_pressures[pos] + pressure_variation)
+                        )
+                        
+                        # Simulate temperature increase during driving
+                        # Temperature rises more at the beginning and stabilizes
+                        speed_factor = current_speed / self.avg_speed_mph
+                        temp_rise = 10 * speed_factor * (1 - np.exp(-3 * progress))
+                        temp_variation = random.uniform(-1, 1)
+                        wheel_temps[pos] = self.avg_temp_f + temp_rise + temp_variation
+                        
+                        # Add noise to rear wheels (they typically run slightly hotter)
+                        # Check if it's a rear wheel (2nd or 3rd axle)
+                        if pos[0] in ['2', '3']:  # 2nd and 3rd axle wheels
+                            wheel_temps[pos] += random.uniform(0, 2)
+                    else:
+                        # Vehicle stopped (signal or breakdown)
+                        wheel_temps[pos] -= random.uniform(0, 0.5)  # Slight cooling
+                
+                # Handle sensor failure
+                if sensor_failure and random.random() < 0.3:
+                    # 30% chance of erratic reading during sensor failure
+                    wheel_pressures[pos] = random.uniform(0, 200)
+                    wheel_temps[pos] = random.uniform(-50, 300)
+                    trigger_value = '1'
                 
                 # Pressure record
                 records.append({
@@ -280,7 +652,7 @@ class TPMSSimulator:
                     'sensor_id': f'sensor{pos}_pressure',
                     'vin': vin,
                     'read_at': read_at,
-                    'trigger': '',
+                    'trigger': trigger_value,
                     'reading': round(wheel_pressures[pos], 1),
                     'ingested_at': ingested_at
                 })
@@ -291,7 +663,7 @@ class TPMSSimulator:
                     'sensor_id': f'sensor{pos}_temperature',
                     'vin': vin,
                     'read_at': read_at,
-                    'trigger': '',
+                    'trigger': trigger_value,
                     'reading': round(wheel_temps[pos], 1),
                     'ingested_at': ingested_at
                 })
@@ -323,6 +695,10 @@ class TPMSSimulator:
             # Advance time
             current_time += timedelta(minutes=self.update_interval_min)
         
+        # Apply data anomalies if enabled
+        if self.enable_data_anomalies:
+            records = self._apply_data_anomalies(records)
+        
         return records
     
     def generate_dataset(self) -> pd.DataFrame:
@@ -342,6 +718,11 @@ class TPMSSimulator:
         print(f"Sensor ID format: sensor{'{position}'}_pressure/temperature")
         print(f"GPS output frequency: Every {self.update_interval_min * 2} minutes")
         
+        if self.enable_traffic_events:
+            print(f"Traffic events: ENABLED")
+        if self.enable_data_anomalies:
+            print(f"Data anomalies: ENABLED (rate: {self.anomaly_rate:.1%}, mode: {self.anomaly_mode})")
+        
         all_records = []
         start_time = datetime.now().replace(microsecond=0, second=0)
         
@@ -352,6 +733,10 @@ class TPMSSimulator:
         
         # Create DataFrame
         df = pd.DataFrame(all_records)
+        
+        if len(df) == 0:
+            print("Warning: No data generated. Check your settings.")
+            return df
         
         # Convert datetime columns to proper format
         df['read_at'] = pd.to_datetime(df['read_at'])
@@ -364,9 +749,17 @@ class TPMSSimulator:
     
     def save_to_parquet(self, df: pd.DataFrame, filename: str = None):
         """Save DataFrame to Parquet file"""
+        if len(df) == 0:
+            print("Warning: DataFrame is empty. No file saved.")
+            return None
+            
         if filename is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             mode_suffix = 'stationary' if self.stationary_mode else 'moving'
+            if self.enable_traffic_events:
+                mode_suffix += '_traffic'
+            if self.enable_data_anomalies:
+                mode_suffix += '_anomalies'
             filename = f'tpms_data_{mode_suffix}_{timestamp}.parquet'
         
         # Ensure data types match ClickHouse schema
@@ -374,24 +767,30 @@ class TPMSSimulator:
         df['sensor_id'] = df['sensor_id'].astype(str)
         df['vin'] = df['vin'].astype(str)
         df['trigger'] = df['trigger'].astype(str)
-        df['reading'] = df['reading'].astype(float)
+        # Handle potential None/NaN values in reading
+        df['reading'] = pd.to_numeric(df['reading'], errors='coerce')
         
         # Save to Parquet
         df.to_parquet(filename, engine='pyarrow', compression='snappy', index=False)
         print(f"Data saved to {filename}")
         print(f"Total records: {len(df)}")
         
-        # Show GPS record statistics
-        gps_records = df[df['sensor_id'].isin(['latitude', 'longitude'])]
-        pressure_records = df[df['sensor_id'].str.contains('pressure')]
-        print(f"Pressure/Temperature records: {len(pressure_records)}")
-        print(f"GPS records: {len(gps_records)}")
-        print(f"Ratio: 1 GPS pair per {len(pressure_records) / (len(gps_records) / 2):.1f} pressure readings")
+        # Show statistics
+        if 'sensor_id' in df.columns:
+            gps_records = df[df['sensor_id'].isin(['latitude', 'longitude'])]
+            pressure_records = df[df['sensor_id'].str.contains('pressure', na=False)]
+            anomaly_records = df[df['trigger'] == '1']
+            
+            print(f"Pressure/Temperature records: {len(pressure_records)}")
+            print(f"GPS records: {len(gps_records)}")
+            if len(gps_records) > 0:
+                print(f"Ratio: 1 GPS pair per {len(pressure_records) / (len(gps_records) / 2):.1f} pressure readings")
+            print(f"Anomaly records: {len(anomaly_records)} ({len(anomaly_records)/len(df)*100:.1f}%)")
         
         return filename
 
 def main():
-    parser = argparse.ArgumentParser(description='TPMS Sensor Data Simulator')
+    parser = argparse.ArgumentParser(description='TPMS Sensor Data Simulator v3.0')
     
     # Required arguments
     parser.add_argument('--vehicles', type=int, required=True, 
@@ -418,6 +817,19 @@ def main():
     parser.add_argument('--output', type=str, default=None,
                        help='Output filename for Parquet file')
     
+    # Traffic event simulation
+    parser.add_argument('--enable-traffic-events', action='store_true',
+                       help='Enable traffic event simulation (congestion, signals, breakdowns, accidents)')
+    
+    # Data anomaly generation
+    parser.add_argument('--enable-data-anomalies', action='store_true',
+                       help='Enable data anomaly generation for testing')
+    parser.add_argument('--anomaly-rate', type=float, default=0.05,
+                       help='Rate of anomaly occurrence (0-1, default: 0.05)')
+    parser.add_argument('--anomaly-mode', type=str, default='mixed',
+                       choices=['mixed', 'single'],
+                       help='Anomaly mode: mixed (various types) or single (one type only)')
+    
     args = parser.parse_args()
     
     # Create simulator
@@ -430,14 +842,21 @@ def main():
         avg_temp_f=args.temp,
         vehicle_type=args.type,
         tenant=args.tenant,
-        update_interval_min=args.interval
+        update_interval_min=args.interval,
+        enable_traffic_events=args.enable_traffic_events,
+        enable_data_anomalies=args.enable_data_anomalies,
+        anomaly_rate=args.anomaly_rate,
+        anomaly_mode=args.anomaly_mode
     )
     
     # Generate dataset
     df = simulator.generate_dataset()
     
     # Save to Parquet
-    simulator.save_to_parquet(df, args.output)
+    if len(df) > 0:
+        simulator.save_to_parquet(df, args.output)
+    else:
+        print("No data generated. Check your settings.")
 
 if __name__ == "__main__":
     main()

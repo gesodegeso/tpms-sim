@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS v1__sensor_reading
     `sensor_id` String COMMENT 'Sensor identifier (sensor position + type or GPS)',
     `vin` String COMMENT 'Vehicle Identification Number',
     `read_at` DateTime64(3) COMMENT 'Timestamp when sensor reading was taken',
-    `trigger` LowCardinality(String) COMMENT 'Trigger event (usually empty)',
-    `reading` Float64 COMMENT 'Sensor reading value (PSI, temperature, or coordinates)',
+    `trigger` LowCardinality(String) COMMENT 'Anomaly indicator (1=anomaly, empty=normal)',
+    `reading` Nullable(Float64) COMMENT 'Sensor reading value (PSI, temperature, or coordinates)',
     `ingested_at` DateTime64(3) DEFAULT now64() COMMENT 'Timestamp when data was ingested'
 )
 ENGINE = MergeTree()
@@ -123,6 +123,7 @@ GROUP BY tenant, vin, sensor_id, hour;
 --     FROM v1__sensor_reading
 --     WHERE sensor_id LIKE '%temperature%'
 --       AND read_at >= today()
+--       AND trigger = ''  -- Exclude anomalies
 --     GROUP BY vin, sensor_id
 -- )
 -- SELECT
@@ -132,3 +133,77 @@ GROUP BY tenant, vin, sensor_id, hour;
 -- FROM trip_temps
 -- GROUP BY sensor_id
 -- ORDER BY sensor_id;
+
+-- ============================================
+-- ANOMALY DETECTION AND ANALYSIS QUERIES
+-- ============================================
+
+-- View for anomaly statistics
+CREATE VIEW IF NOT EXISTS v1__anomaly_stats AS
+SELECT
+    tenant,
+    vin,
+    toDate(read_at) as date,
+    COUNT(*) as total_records,
+    COUNT(CASE WHEN trigger = '1' THEN 1 END) as anomaly_count,
+    COUNT(CASE WHEN trigger = '1' THEN 1 END) * 100.0 / COUNT(*) as anomaly_rate
+FROM v1__sensor_reading
+GROUP BY tenant, vin, date;
+
+-- View for data quality monitoring
+CREATE VIEW IF NOT EXISTS v1__data_quality AS
+SELECT
+    toStartOfHour(read_at) as hour,
+    COUNT(*) as total_records,
+    COUNT(CASE WHEN trigger = '1' THEN 1 END) as anomalies,
+    COUNT(CASE WHEN reading IS NULL THEN 1 END) as null_readings,
+    COUNT(CASE WHEN sensor_id LIKE '%pressure%' AND (reading < 0 OR reading > 200) THEN 1 END) as out_of_range_pressure,
+    COUNT(CASE WHEN sensor_id LIKE '%temperature%' AND (reading < -50 OR reading > 300) THEN 1 END) as out_of_range_temp,
+    COUNT(CASE WHEN ingested_at < read_at THEN 1 END) as timestamp_anomalies
+FROM v1__sensor_reading
+GROUP BY hour
+ORDER BY hour DESC;
+
+-- Detect traffic events based on anomaly patterns
+-- SELECT
+--     vin,
+--     min(read_at) as event_start,
+--     max(read_at) as event_end,
+--     count(*) as anomaly_count,
+--     avg(CASE WHEN sensor_id LIKE '%pressure%' THEN reading END) as avg_pressure,
+--     min(CASE WHEN sensor_id LIKE '%pressure%' THEN reading END) as min_pressure
+-- FROM v1__sensor_reading
+-- WHERE trigger = '1'
+--   AND read_at >= now() - INTERVAL 1 DAY
+-- GROUP BY vin, toStartOfHour(read_at)
+-- HAVING anomaly_count > 10
+-- ORDER BY event_start DESC;
+
+-- Identify potential sensor failures
+-- SELECT
+--     vin,
+--     sensor_id,
+--     COUNT(*) as error_count,
+--     MIN(read_at) as first_error,
+--     MAX(read_at) as last_error,
+--     arrayStringConcat(groupArray(toString(reading)), ', ') as sample_readings
+-- FROM v1__sensor_reading
+-- WHERE trigger = '1'
+--   AND (reading IS NULL OR reading < 0 OR reading > 999)
+-- GROUP BY vin, sensor_id
+-- HAVING error_count > 5
+-- ORDER BY error_count DESC;
+
+-- Data completeness check
+-- SELECT
+--     vin,
+--     COUNT(DISTINCT sensor_id) as active_sensors,
+--     COUNT(DISTINCT toStartOfHour(read_at)) as hours_with_data,
+--     MIN(read_at) as first_reading,
+--     MAX(read_at) as last_reading,
+--     COUNT(*) as total_readings,
+--     COUNT(CASE WHEN trigger = '1' THEN 1 END) as anomaly_readings
+-- FROM v1__sensor_reading
+-- WHERE read_at >= today()
+-- GROUP BY vin
+-- ORDER BY anomaly_readings DESC;

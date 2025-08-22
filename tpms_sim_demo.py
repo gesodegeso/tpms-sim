@@ -203,7 +203,144 @@ def example_short_trip():
     
     return df
 
-def verify_clickhouse_compatibility(df):
+def example_traffic_events():
+    """Example: Simulation with traffic events"""
+    print("\n" + "=" * 60)
+    print("Example 6: Traffic Events Simulation")
+    print("=" * 60)
+    
+    simulator = TPMSSimulator(
+        num_vehicles=2,
+        num_wheels=4,
+        start_location="Los Angeles, CA",
+        end_location="San Diego, CA",
+        avg_speed_mph=65,
+        avg_temp_f=78,
+        vehicle_type="regular",
+        tenant="traffic_test",
+        update_interval_min=5,
+        enable_traffic_events=True,  # Enable traffic events
+        enable_data_anomalies=False
+    )
+    
+    df = simulator.generate_dataset()
+    filename = simulator.save_to_parquet(df, "traffic_events_example.parquet")
+    
+    # Analyze anomalies caused by traffic events
+    print("\nTraffic Event Impact Analysis:")
+    anomaly_df = df[df['trigger'] == '1']
+    normal_df = df[df['trigger'] == '']
+    
+    print(f"  Normal records: {len(normal_df)}")
+    print(f"  Anomaly records (from events): {len(anomaly_df)}")
+    
+    if len(anomaly_df) > 0:
+        print("\nAnomalous readings detected:")
+        print(anomaly_df[['sensor_id', 'reading', 'read_at']].head(10))
+    
+    return df
+
+def example_data_anomalies():
+    """Example: Data anomaly testing"""
+    print("\n" + "=" * 60)
+    print("Example 7: Data Anomaly Testing")
+    print("=" * 60)
+    
+    simulator = TPMSSimulator(
+        num_vehicles=1,
+        num_wheels=4,
+        start_location="Phoenix, AZ",
+        end_location="Tucson, AZ",
+        avg_speed_mph=60,
+        avg_temp_f=95,
+        vehicle_type="regular",
+        tenant="anomaly_test",
+        update_interval_min=5,
+        enable_traffic_events=False,
+        enable_data_anomalies=True,  # Enable data anomalies
+        anomaly_rate=0.1,  # 10% anomaly rate
+        anomaly_mode='mixed'  # Mixed anomaly types
+    )
+    
+    df = simulator.generate_dataset()
+    filename = simulator.save_to_parquet(df, "data_anomalies_example.parquet")
+    
+    # Analyze anomaly types
+    print("\nData Anomaly Analysis:")
+    anomaly_df = df[df['trigger'] == '1']
+    
+    print(f"  Total anomalies: {len(anomaly_df)} / {len(df)} ({len(anomaly_df)/len(df)*100:.1f}%)")
+    
+    # Check for various anomaly types
+    if 'reading' in df.columns:
+        # Out of range values
+        pressure_df = df[df['sensor_id'].str.contains('pressure', na=False)]
+        if len(pressure_df) > 0:
+            out_of_range = pressure_df[(pressure_df['reading'] < 0) | (pressure_df['reading'] > 200)]
+            print(f"  Out-of-range pressure values: {len(out_of_range)}")
+        
+        # Null values
+        null_values = df[df['reading'].isna()]
+        print(f"  Null/NaN readings: {len(null_values)}")
+    
+    # Invalid sensor IDs
+    if 'sensor_id' in df.columns:
+        valid_patterns = ['sensor', 'latitude', 'longitude']
+        invalid_sensors = df[~df['sensor_id'].str.contains('|'.join(valid_patterns), na=False)]
+        print(f"  Invalid sensor IDs: {len(invalid_sensors)}")
+    
+    # Timestamp issues
+    if 'read_at' in df.columns and 'ingested_at' in df.columns:
+        timestamp_issues = df[df['ingested_at'] < df['read_at']]
+        print(f"  Timestamp anomalies: {len(timestamp_issues)}")
+    
+    return df
+
+def example_combined_simulation():
+    """Example: Combined traffic events and data anomalies"""
+    print("\n" + "=" * 60)
+    print("Example 8: Combined Simulation (Traffic + Anomalies)")
+    print("=" * 60)
+    
+    simulator = TPMSSimulator(
+        num_vehicles=3,
+        num_wheels=6,
+        start_location="Seattle, WA",
+        end_location="Portland, OR",
+        avg_speed_mph=55,
+        avg_temp_f=62,
+        vehicle_type="heavy_duty",
+        tenant="combined_test",
+        update_interval_min=10,
+        enable_traffic_events=True,
+        enable_data_anomalies=True,
+        anomaly_rate=0.05,
+        anomaly_mode='mixed'
+    )
+    
+    df = simulator.generate_dataset()
+    filename = simulator.save_to_parquet(df, "combined_simulation_example.parquet")
+    
+    # Comprehensive analysis
+    print("\nComprehensive Simulation Analysis:")
+    print(f"  Total records: {len(df)}")
+    print(f"  Unique vehicles: {df['vin'].nunique()}")
+    print(f"  Time range: {df['read_at'].min()} to {df['read_at'].max()}")
+    
+    # Anomaly breakdown
+    anomaly_df = df[df['trigger'] == '1']
+    print(f"\nAnomaly Statistics:")
+    print(f"  Total anomalies: {len(anomaly_df)} ({len(anomaly_df)/len(df)*100:.1f}%)")
+    
+    # Sensor health check
+    sensors = df['sensor_id'].value_counts()
+    print(f"\nSensor Health Check:")
+    print(f"  Total unique sensors: {len(sensors)}")
+    print(f"  Average readings per sensor: {sensors.mean():.1f}")
+    print(f"  Min readings: {sensors.min()}")
+    print(f"  Max readings: {sensors.max()}")
+    
+    return df
     """Verify that the DataFrame is compatible with ClickHouse schema"""
     print("\n" + "=" * 60)
     print("ClickHouse Compatibility Check")
@@ -244,18 +381,21 @@ def verify_clickhouse_compatibility(df):
 
 def main():
     """Run all examples"""
-    print("TPMS Simulator - Demonstration Examples")
+    print("TPMS Simulator v3.0 - Demonstration Examples")
     print("=" * 60)
     
     # Run examples
     df1 = example_regular_vehicle()
     df2 = example_heavy_duty_vehicle()
     df3 = example_mixed_fleet()
-    df4 = example_stationary_monitoring()  # New stationary mode example
+    df4 = example_stationary_monitoring()
     df5 = example_short_trip()
+    df6 = example_traffic_events()  # New: traffic events
+    df7 = example_data_anomalies()  # New: data anomalies
+    df8 = example_combined_simulation()  # New: combined simulation
     
     # Verify ClickHouse compatibility for the last generated dataset
-    verify_clickhouse_compatibility(df5)
+    verify_clickhouse_compatibility(df8)
     
     print("\n" + "=" * 60)
     print("All examples completed successfully!")
@@ -265,7 +405,11 @@ def main():
     print("  - mixed_fleet_example.parquet")
     print("  - stationary_monitoring_example.parquet")
     print("  - short_trip_example.parquet")
+    print("  - traffic_events_example.parquet")
+    print("  - data_anomalies_example.parquet")
+    print("  - combined_simulation_example.parquet")
     print("\nThese files can be imported directly into ClickHouse.")
+    print("\nNote: Files with anomalies have trigger='1' for abnormal records.")
 
 if __name__ == "__main__":
     main()
