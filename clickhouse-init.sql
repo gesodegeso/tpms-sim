@@ -14,7 +14,7 @@ DROP TABLE IF EXISTS v1__sensor_reading;
 CREATE TABLE IF NOT EXISTS v1__sensor_reading
 (
     `tenant` LowCardinality(String) COMMENT 'Tenant identifier',
-    `sensor_id` String COMMENT 'Sensor identifier (tire position + type or GPS)',
+    `sensor_id` String COMMENT 'Sensor identifier (sensor position + type or GPS)',
     `vin` String COMMENT 'Vehicle Identification Number',
     `read_at` DateTime64(3) COMMENT 'Timestamp when sensor reading was taken',
     `trigger` LowCardinality(String) COMMENT 'Trigger event (usually empty)',
@@ -97,7 +97,7 @@ GROUP BY tenant, vin, sensor_id, hour;
 --     reading as pressure
 -- FROM v1__sensor_reading
 -- WHERE vin = '1HGBH41JXMN109186'
---   AND sensor_id = 'tire11_pressure'
+--   AND sensor_id = 'sensor11_pressure'
 -- ORDER BY read_at;
 
 -- Find vehicles with potential tire issues

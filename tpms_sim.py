@@ -2,7 +2,7 @@
 """
 TPMS (Tire Pressure Monitoring System) Sensor Data Simulator
 Generates simulated tire pressure and temperature data in Parquet format for ClickHouse import
-Version 2.0 - Added stationary mode support and GPS output frequency control
+Version 2.1 - Updated wheel numbering system and sensor ID prefix
 """
 
 import argparse
@@ -178,18 +178,20 @@ class TPMSSimulator:
     def _get_wheel_positions(self) -> List[str]:
         """Get wheel position codes based on number of wheels"""
         if self.num_wheels == 4:
-            # Standard 4-wheel: FL, FR, RL, RR
-            return ['11', '12', '21', '22']
+            # 4-wheel: FL(11), FR(14), RL(21), RR(24)
+            return ['11', '14', '21', '24']
         elif self.num_wheels == 6:
-            # 6-wheel: FL, FR, RL-inner, RL-outer, RR-inner, RR-outer
-            return ['11', '12', '21', '22', '31', '32']
+            # 6-wheel: FL(11), FR(14), RL-outer(21), RL-inner(22), RR-inner(23), RR-outer(24)
+            return ['11', '14', '21', '22', '23', '24']
         elif self.num_wheels == 8:
-            # 8-wheel: FL, FR, RL1-inner, RL1-outer, RL2-inner, RL2-outer, RR1-inner, RR1-outer
-            return ['11', '12', '21', '22', '31', '32', '41', '42']
+            # 8-wheel: FL(11), FR(14), 2nd-L(21), 2nd-R(24), 
+            #         3rd-L-outer(31), 3rd-L-inner(32), 3rd-R-inner(33), 3rd-R-outer(34)
+            return ['11', '14', '21', '24', '31', '32', '33', '34']
         elif self.num_wheels == 10:
-            # 10-wheel: FL, FR, RL1-inner, RL1-outer, RL2-inner, RL2-outer, 
-            #          RR1-inner, RR1-outer, RR2-inner, RR2-outer
-            return ['11', '12', '21', '22', '31', '32', '41', '42', '51', '52']
+            # 10-wheel: FL(11), FR(14), 
+            #          2nd-L-outer(21), 2nd-L-inner(22), 2nd-R-inner(23), 2nd-R-outer(24),
+            #          3rd-L-outer(31), 3rd-L-inner(32), 3rd-R-inner(33), 3rd-R-outer(34)
+            return ['11', '14', '21', '22', '23', '24', '31', '32', '33', '34']
     
     def _generate_sensor_data(self, vin: str, start_time: datetime) -> List[Dict]:
         """Generate sensor data for one vehicle"""
@@ -268,13 +270,14 @@ class TPMSSimulator:
                     wheel_temps[pos] = self.avg_temp_f + temp_rise + temp_variation
                     
                     # Add noise to rear wheels (they typically run slightly hotter)
-                    if pos[0] in ['2', '3', '4', '5']:  # Rear wheels
+                    # Check if it's a rear wheel (2nd or 3rd axle)
+                    if pos[0] in ['2', '3']:  # 2nd and 3rd axle wheels
                         wheel_temps[pos] += random.uniform(0, 2)
                 
                 # Pressure record
                 records.append({
                     'tenant': self.tenant,
-                    'sensor_id': f'tire{pos}_pressure',
+                    'sensor_id': f'sensor{pos}_pressure',
                     'vin': vin,
                     'read_at': read_at,
                     'trigger': '',
@@ -285,7 +288,7 @@ class TPMSSimulator:
                 # Temperature record
                 records.append({
                     'tenant': self.tenant,
-                    'sensor_id': f'tire{pos}_temperature',
+                    'sensor_id': f'sensor{pos}_temperature',
                     'vin': vin,
                     'read_at': read_at,
                     'trigger': '',
@@ -336,6 +339,7 @@ class TPMSSimulator:
         print(f"Duration for data generation: {self.trip_duration_hours:.2f} hours")
         print(f"Vehicle type: {self.vehicle_type}")
         print(f"Number of wheels per vehicle: {self.num_wheels}")
+        print(f"Sensor ID format: sensor{'{position}'}_pressure/temperature")
         print(f"GPS output frequency: Every {self.update_interval_min * 2} minutes")
         
         all_records = []

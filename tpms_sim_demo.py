@@ -64,7 +64,7 @@ def example_heavy_duty_vehicle():
     
     # Display wheel configuration
     print("\nWheel Configuration for 10-wheel truck:")
-    wheel_sensors = df[df['sensor_id'].str.contains('tire')]['sensor_id'].unique()
+    wheel_sensors = df[df['sensor_id'].str.contains('sensor')]['sensor_id'].unique()
     wheel_positions = sorted(set([s.split('_')[0] for s in wheel_sensors]))
     for pos in wheel_positions:
         print(f"  {pos}")
@@ -72,7 +72,7 @@ def example_heavy_duty_vehicle():
     # Display pressure by wheel position
     print("\nAverage pressure by wheel position:")
     pressure_df = df[df['sensor_id'].str.contains('pressure')].copy()
-    pressure_df['wheel_pos'] = pressure_df['sensor_id'].str.extract(r'tire(\d+)_')
+    pressure_df['wheel_pos'] = pressure_df['sensor_id'].str.extract(r'sensor(\d+)_')
     avg_pressure = pressure_df.groupby('wheel_pos')['reading'].mean().sort_index()
     for pos, pressure in avg_pressure.items():
         print(f"  Wheel {pos}: {pressure:.1f} PSI")
@@ -105,10 +105,10 @@ def example_mixed_fleet():
     temp_df = df[(df['vin'] == first_vin) & (df['sensor_id'].str.contains('temperature'))]
     
     # Get start and end temperatures for front and rear wheels
-    front_temp_start = temp_df[temp_df['sensor_id'] == 'tire11_temperature']['reading'].iloc[0]
-    front_temp_end = temp_df[temp_df['sensor_id'] == 'tire11_temperature']['reading'].iloc[-1]
-    rear_temp_start = temp_df[temp_df['sensor_id'] == 'tire21_temperature']['reading'].iloc[0]
-    rear_temp_end = temp_df[temp_df['sensor_id'] == 'tire21_temperature']['reading'].iloc[-1]
+    front_temp_start = temp_df[temp_df['sensor_id'] == 'sensor11_temperature']['reading'].iloc[0]
+    front_temp_end = temp_df[temp_df['sensor_id'] == 'sensor11_temperature']['reading'].iloc[-1]
+    rear_temp_start = temp_df[temp_df['sensor_id'] == 'sensor21_temperature']['reading'].iloc[0]
+    rear_temp_end = temp_df[temp_df['sensor_id'] == 'sensor21_temperature']['reading'].iloc[-1]
     
     print(f"  Front wheel temperature rise: {front_temp_start:.1f}°F → {front_temp_end:.1f}°F "
           f"(+{front_temp_end - front_temp_start:.1f}°F)")
