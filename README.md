@@ -1,34 +1,63 @@
-# TPMS Sensor Data Simulator
+# TPMS Sensor Data Simulator v2.0
 
 ## 概要
 このプログラムは、TPMS（タイヤ空気圧監視システム）センサーの出力データをシミュレートし、ClickHouseデータベースに直接インポート可能なParquet形式で出力します。
 
+**v2.0の新機能:**
+- 🆕 停止中モード（速度0）のサポート - 整備工場や車庫での車両監視に対応
+- 🆕 GPS出力頻度の最適化 - 圧力/温度レコード2回ごとに1回出力
+
 ## 機能
 - 複数車両のセンサーデータを同時生成
 - 実際の道路距離計算（OpenStreetMap使用）
-- 走行による温度上昇のシミュレーション
+- 走行による温度上昇のシミュレーション（移動時のみ）
+- 停止中モードでの車両監視データ生成
 - 標準的なVIN形式での車両識別番号生成
 - ClickHouse互換のParquet形式出力
+- GPS出力頻度の調整（データ量最適化）
 
 ## インストール
 
-### 必須パッケージ
+### 1. リポジトリのクローンまたはダウンロード
 ```bash
-pip install pandas numpy geopy pyarrow
+git clone <repository-url>
+cd tpms-simulator
 ```
 
-### オプションパッケージ（実際の道路距離計算用）
-```bash
-pip install osmnx networkx
-```
+### 2. Pythonパッケージのインストール
 
-注意: osmnxがインストールされていない場合、プログラムは自動的に直線距離×1.2の簡易計算にフォールバックします。
+#### オプション A: 最小構成（推奨）
+```bash
+pip install -r requirements-minimal.txt
+```
+最小限の依存パッケージのみインストール。道路距離は簡易計算（直線距離×1.2）を使用。
+
+#### オプション B: フル機能
+```bash
+pip install -r requirements.txt
+```
+OpenStreetMapを使用した実際の道路距離計算を含む全機能をインストール。
+
+### 3. 仮想環境の使用（推奨）
+```bash
+# 仮想環境の作成
+python -m venv venv
+
+# アクティベート
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+
+# パッケージのインストール
+pip install -r requirements-minimal.txt
+```
 
 ## 使用方法
 
 ### 基本的な使用例
 
-#### 普通車4台、4輪、ニューヨークからボストンへ
+#### 走行モード（通常の使用）
 ```bash
 python tpms_simulator.py \
   --vehicles 4 \
@@ -40,7 +69,21 @@ python tpms_simulator.py \
   --type regular
 ```
 
-#### Heavy Duty車両2台、10輪、ロサンゼルスからサンフランシスコへ
+#### 🆕 停止中モード（整備工場/車庫での監視）
+```bash
+python tpms_simulator.py \
+  --vehicles 5 \
+  --wheels 4 \
+  --start "Chicago, IL" \
+  --end "Detroit, MI" \
+  --speed 0 \
+  --temp 68 \
+  --type regular \
+  --tenant "maintenance_shop"
+```
+**注意:** 速度を0に設定すると停止中モードになります。車両は開始地点に留まり、温度変化なし、圧力の微小変動のみをシミュレートします。
+
+#### Heavy Duty車両の長距離輸送
 ```bash
 python tpms_simulator.py \
   --vehicles 2 \
@@ -57,123 +100,206 @@ python tpms_simulator.py \
 ### パラメータ詳細
 
 #### 必須パラメータ
-- `--vehicles`: 車両台数（整数）
-- `--wheels`: 車輪数（4, 6, 8, 10のいずれか）
-- `--start`: 出発地点（形式: "都市名, 州名"）
-- `--end`: 到着地点（形式: "都市名, 州名"）
-- `--speed`: 平均速度（mph）
-- `--temp`: 平均外気温（華氏）
-- `--type`: 車両タイプ（regular または heavy_duty）
+| パラメータ | 説明 | 例 |
+|-----------|------|-----|
+| `--vehicles` | 車両台数 | `4` |
+| `--wheels` | 車輪数（4, 6, 8, 10） | `4` |
+| `--start` | 出発地点 | `"Chicago, IL"` |
+| `--end` | 到着地点 | `"Detroit, MI"` |
+| `--speed` | 平均速度（mph）<br>**0で停止中モード** | `60` または `0` |
+| `--temp` | 平均外気温（華氏） | `75` |
+| `--type` | 車両タイプ | `regular` or `heavy_duty` |
 
 #### オプションパラメータ
-- `--tenant`: テナント名（省略時は自動生成）
-- `--interval`: データ更新間隔（分、デフォルト: 5）
-- `--output`: 出力ファイル名（省略時は自動生成）
+| パラメータ | 説明 | デフォルト |
+|-----------|------|-----------|
+| `--tenant` | テナント名 | 自動生成 |
+| `--interval` | データ更新間隔（分） | `5` |
+| `--output` | 出力ファイル名 | 自動生成 |
 
-## 車輪番号の割り当て
+## 動作モード
 
-### 4輪車
-- 11: 前左、12: 前右
-- 21: 後左、22: 後右
+### 走行モード（速度 > 0）
+- 車両は開始地点から終了地点へ移動
+- タイヤ温度は走行により上昇（最大+10°F）
+- 圧力は±0.5 PSIの範囲で変動
+- GPSは実際の移動経路を記録
 
-### 6輪車
-- 11: 前左、12: 前右
-- 21: 後左内側、22: 後左外側
-- 31: 後右内側、32: 後右外側
+### 🆕 停止中モード（速度 = 0）
+- 車両は開始地点に留まる
+- タイヤ温度は外気温のまま（変化なし）
+- 圧力は±0.2 PSIの微小変動のみ
+- データ生成期間は法定速度での移動時間を使用
+  - 州内移動: 55 mph
+  - 州間移動: 65 mph
+- 用途: 整備工場、車庫、駐車場での車両監視
 
-### 8輪車
-- 11: 前左、12: 前右
-- 21: 後左1内側、22: 後左1外側
-- 31: 後左2内側、32: 後左2外側
-- 41: 後右1内側、42: 後右1外側
+## データ出力仕様
 
-### 10輪車
-- 11: 前左、12: 前右
-- 21: 後左1内側、22: 後左1外側
-- 31: 後左2内側、32: 後左2外側
-- 41: 後右1内側、42: 後右1外側
-- 51: 後右2内側、52: 後右2外側
+### GPS出力頻度
+- 🆕 圧力/温度レコード2回ごとに1回GPS位置情報を出力
+- 例（5分間隔の場合）:
+  - 0分: 圧力・温度
+  - 5分: 圧力・温度
+  - 10分: 圧力・温度・**GPS**
+  - 15分: 圧力・温度
+  - 20分: 圧力・温度・**GPS**
+
+### 車輪番号の割り当て
+- **4輪**: 11(前左), 12(前右), 21(後左), 22(後右)
+- **6輪**: 11, 12, 21, 22, 31, 32
+- **8輪**: 11, 12, 21, 22, 31, 32, 41, 42
+- **10輪**: 11, 12, 21, 22, 31, 32, 41, 42, 51, 52
+
+### センサーIDの形式
+- タイヤ圧力: `tire{位置番号}_pressure`
+- タイヤ温度: `tire{位置番号}_temperature`
+- 緯度: `latitude`
+- 経度: `longitude`
 
 ## データフォーマット
 
 ### 出力カラム
-- `tenant`: テナント名（LowCardinality(String)）
-- `sensor_id`: センサーID（String）
-- `vin`: 車両識別番号（String）
-- `read_at`: 読み取り時刻（DateTime64(3)）
-- `trigger`: トリガー（空文字列）
-- `reading`: 測定値（Float64）
-- `ingested_at`: 取り込み時刻（DateTime64(3)）
+| カラム名 | データ型 | 説明 |
+|---------|---------|------|
+| tenant | String | テナント識別子 |
+| sensor_id | String | センサーID |
+| vin | String | 17桁の車両識別番号 |
+| read_at | DateTime | 読み取り時刻 |
+| trigger | String | トリガー（空文字） |
+| reading | Float64 | 測定値 |
+| ingested_at | DateTime | 取り込み時刻（read_at + 2分） |
 
-### センサーIDの形式
-- タイヤ圧力: `tire{位置番号}_pressure`（例: tire11_pressure）
-- タイヤ温度: `tire{位置番号}_temperature`（例: tire11_temperature）
-- 緯度: `latitude`
-- 経度: `longitude`
+### 圧力値の範囲
+- **普通車**: 31-35 PSI
+  - 走行中: ±0.5 PSI変動
+  - 停止中: ±0.2 PSI変動
+- **Heavy Duty**: 85-120 PSI
+  - 走行中: ±0.5 PSI変動
+  - 停止中: ±0.2 PSI変動
+
+### 温度値の特性
+- **走行モード**: 外気温から最大+10°F上昇
+- **停止中モード**: 外気温±1°F（変化なし）
 
 ## ClickHouseへのインポート
 
-生成されたParquetファイルは以下のコマンドでClickHouseにインポートできます：
-
 ```sql
+-- テーブルへのインポート
 INSERT INTO v1__sensor_reading 
 SELECT * FROM file('path/to/tpms_data_*.parquet', 'Parquet');
+
+-- データの確認
+SELECT 
+    sensor_id,
+    count() as record_count,
+    avg(reading) as avg_reading
+FROM v1__sensor_reading
+GROUP BY sensor_id
+ORDER BY sensor_id;
 ```
 
-## データの特徴
+## 使用例
 
-### 圧力値
-- 普通車: 31-35 PSI範囲で変動
-- Heavy Duty: 85-120 PSI範囲で変動
-- 走行中は±0.5 PSIの微小変動
+### 例1: 整備工場での24時間監視
+```bash
+python tpms_simulator.py \
+  --vehicles 10 \
+  --wheels 4 \
+  --start "Denver, CO" \
+  --end "Salt Lake City, UT" \
+  --speed 0 \
+  --temp 65 \
+  --type regular \
+  --tenant "denver_maintenance" \
+  --interval 30  # 30分ごとの記録
+```
 
-### 温度値
-- 走行開始時: 外気温±2°F
-- 走行中: 徐々に上昇（最大約10°F）
-- 後輪は前輪より若干高温
+### 例2: 配送トラックの都市内走行
+```bash
+python tpms_simulator.py \
+  --vehicles 3 \
+  --wheels 6 \
+  --start "Manhattan, NY" \
+  --end "Brooklyn, NY" \
+  --speed 25 \
+  --temp 72 \
+  --type heavy_duty \
+  --tenant "city_delivery" \
+  --interval 2  # 頻繁な更新
+```
 
-### 更新頻度
-- デフォルト5分間隔
-- ingested_atはread_atの2分後
+### 例3: 長距離トラック輸送
+```bash
+python tpms_simulator.py \
+  --vehicles 5 \
+  --wheels 10 \
+  --start "Seattle, WA" \
+  --end "Portland, OR" \
+  --speed 55 \
+  --temp 60 \
+  --type heavy_duty \
+  --tenant "interstate_logistics"
+```
 
 ## トラブルシューティング
 
 ### "Could not find coordinates" エラー
-- 地点名が正しいか確認してください
-- 米国内の地点であることを確認してください
-- インターネット接続を確認してください
+- 地点名が正しいか確認
+- 米国内の地点であることを確認
+- インターネット接続を確認
 
 ### OSMnx関連のエラー
-- osmnxパッケージがインストールされていない場合、自動的に簡易計算モードに切り替わります
-- 簡易計算では直線距離の1.2倍を道路距離として使用します
+- `requirements.txt`でフル機能版をインストール
+- または`requirements-minimal.txt`で簡易計算モードを使用
 
 ### メモリ不足エラー
-- 大量の車両を生成する場合、メモリ使用量に注意してください
-- 必要に応じて車両数を分割して実行してください
+- 車両数を減らして実行
+- または仮想メモリを増やす: `ulimit -v unlimited`
+
+### 停止中モードでデータが生成されない
+- 速度が正確に0に設定されているか確認
+- 開始地点と終了地点が異なることを確認（距離計算のため）
 
 ## Python実行例
 
 ```python
 from tpms_simulator import TPMSSimulator
 
-# シミュレータを初期化
-simulator = TPMSSimulator(
-    num_vehicles=5,
+# 停止中モードのシミュレータ
+stationary_sim = TPMSSimulator(
+    num_vehicles=3,
     num_wheels=4,
-    start_location="Chicago, IL",
-    end_location="Detroit, MI",
-    avg_speed_mph=65,
-    avg_temp_f=70,
+    start_location="Phoenix, AZ",
+    end_location="Tucson, AZ",
+    avg_speed_mph=0,  # 停止中モード
+    avg_temp_f=95,
     vehicle_type="regular",
-    tenant="my_company"
+    tenant="repair_shop"
 )
 
-# データセットを生成
-df = simulator.generate_dataset()
-
-# Parquetファイルに保存
-simulator.save_to_parquet(df, "output.parquet")
+# データ生成と保存
+df = stationary_sim.generate_dataset()
+stationary_sim.save_to_parquet(df, "stationary_monitoring.parquet")
 ```
+
+## バージョン履歴
+
+### v2.0 (Current)
+- 停止中モード（速度0）のサポート
+- GPS出力頻度の最適化（2:1比率）
+- 停止中の圧力変動を現実的に調整
+
+### v1.0
+- 初期リリース
+- 基本的なTPMSデータシミュレーション
+- OpenStreetMap統合
 
 ## ライセンス
 このプログラムはデモンストレーション目的で提供されています。
+
+## サポート
+問題が発生した場合は、以下を確認してください：
+1. Pythonバージョン3.7以上
+2. 必要なパッケージがインストールされている
+3. インターネット接続が利用可能（ジオコーディング用）

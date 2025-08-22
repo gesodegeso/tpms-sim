@@ -117,10 +117,59 @@ def example_mixed_fleet():
     
     return df
 
+def example_stationary_monitoring():
+    """Example: Stationary monitoring in maintenance shop"""
+    print("\n" + "=" * 60)
+    print("Example 4: Stationary Monitoring (maintenance shop)")
+    print("=" * 60)
+    
+    simulator = TPMSSimulator(
+        num_vehicles=3,
+        num_wheels=4,
+        start_location="Phoenix, AZ",
+        end_location="Tucson, AZ",
+        avg_speed_mph=0,  # STATIONARY MODE
+        avg_temp_f=72,
+        vehicle_type="regular",
+        tenant="repair_shop",
+        update_interval_min=15  # Less frequent updates for stationary monitoring
+    )
+    
+    df = simulator.generate_dataset()
+    filename = simulator.save_to_parquet(df, "stationary_monitoring_example.parquet")
+    
+    # Analyze pressure stability in stationary mode
+    print("\nPressure Stability Analysis (stationary mode):")
+    first_vin = df['vin'].unique()[0]
+    pressure_df = df[(df['vin'] == first_vin) & (df['sensor_id'].str.contains('pressure'))]
+    
+    for sensor in pressure_df['sensor_id'].unique()[:2]:  # Show first 2 wheels
+        sensor_data = pressure_df[pressure_df['sensor_id'] == sensor]['reading']
+        print(f"  {sensor}:")
+        print(f"    Mean: {sensor_data.mean():.2f} PSI")
+        print(f"    Std Dev: {sensor_data.std():.3f} PSI")
+        print(f"    Range: {sensor_data.min():.2f} - {sensor_data.max():.2f} PSI")
+    
+    # Verify no temperature change
+    temp_df = df[(df['vin'] == first_vin) & (df['sensor_id'].str.contains('temperature'))]
+    temp_ranges = temp_df.groupby('sensor_id')['reading'].agg(['min', 'max'])
+    print("\nTemperature Stability (should be minimal change):")
+    print(temp_ranges.head(2))
+    
+    # Check GPS output frequency
+    gps_count = len(df[(df['vin'] == first_vin) & (df['sensor_id'] == 'latitude')])
+    pressure_count = len(df[(df['vin'] == first_vin) & (df['sensor_id'].str.contains('pressure'))]) / 4  # Divide by number of wheels
+    print(f"\nGPS Output Frequency:")
+    print(f"  Pressure readings: {int(pressure_count)}")
+    print(f"  GPS readings: {gps_count}")
+    print(f"  Ratio: 1 GPS per {pressure_count/gps_count:.1f} pressure readings")
+    
+    return df
+
 def example_short_trip():
     """Example: Short urban trip with frequent updates"""
     print("\n" + "=" * 60)
-    print("Example 4: Short Urban Trip (frequent updates)")
+    print("Example 5: Short Urban Trip (frequent updates)")
     print("=" * 60)
     
     simulator = TPMSSimulator(
@@ -202,10 +251,11 @@ def main():
     df1 = example_regular_vehicle()
     df2 = example_heavy_duty_vehicle()
     df3 = example_mixed_fleet()
-    df4 = example_short_trip()
+    df4 = example_stationary_monitoring()  # New stationary mode example
+    df5 = example_short_trip()
     
     # Verify ClickHouse compatibility for the last generated dataset
-    verify_clickhouse_compatibility(df4)
+    verify_clickhouse_compatibility(df5)
     
     print("\n" + "=" * 60)
     print("All examples completed successfully!")
@@ -213,6 +263,7 @@ def main():
     print("  - regular_vehicles_example.parquet")
     print("  - heavy_duty_example.parquet")
     print("  - mixed_fleet_example.parquet")
+    print("  - stationary_monitoring_example.parquet")
     print("  - short_trip_example.parquet")
     print("\nThese files can be imported directly into ClickHouse.")
 

@@ -46,6 +46,24 @@ services:
       "--output", "/app/output/heavy_duty_vehicles.parquet"
     ]
 
+  # Example service for stationary monitoring
+  simulate-stationary:
+    image: tpms-simulator:latest
+    volumes:
+      - ./output:/app/output
+    command: [
+      "--vehicles", "5",
+      "--wheels", "4",
+      "--start", "Denver, CO",
+      "--end", "Colorado Springs, CO",
+      "--speed", "0",  # Stationary mode
+      "--temp", "65",
+      "--type", "regular",
+      "--tenant", "maintenance_facility",
+      "--interval", "30",  # 30-minute intervals for stationary monitoring
+      "--output", "/app/output/stationary_monitoring.parquet"
+    ]
+
   # ClickHouse service for testing data import
   clickhouse:
     image: clickhouse/clickhouse-server:latest

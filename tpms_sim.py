@@ -2,6 +2,7 @@
 """
 TPMS (Tire Pressure Monitoring System) Sensor Data Simulator
 Generates simulated tire pressure and temperature data in Parquet format for ClickHouse import
+Version 2.0 - Added stationary mode support and GPS output frequency control
 """
 
 import argparse
@@ -38,7 +39,7 @@ class TPMSSimulator:
             num_wheels: Number of wheels per vehicle (4, 6, 8, or 10)
             start_location: Starting location (format: "City, State")
             end_location: Ending location (format: "City, State")
-            avg_speed_mph: Average speed in miles per hour
+            avg_speed_mph: Average speed in miles per hour (0 for stationary mode)
             avg_temp_f: Average ambient temperature in Fahrenheit
             vehicle_type: Type of vehicle ("regular" or "heavy_duty")
             tenant: Tenant name (optional)
@@ -53,6 +54,7 @@ class TPMSSimulator:
         self.vehicle_type = vehicle_type.lower().replace(" ", "_")
         self.tenant = tenant or f"test{random.randint(1000000000, 9999999999)}"
         self.update_interval_min = update_interval_min
+        self.stationary_mode = (avg_speed_mph == 0)
         
         # Validate inputs
         if num_wheels not in [4, 6, 8, 10]:
@@ -79,11 +81,30 @@ class TPMSSimulator:
         self.route_distance_miles = self._calculate_route_distance()
         
         # Calculate trip duration
-        self.trip_duration_hours = self.route_distance_miles / avg_speed_mph
+        if self.stationary_mode:
+            # Use legal speed limit for duration calculation in stationary mode
+            legal_speed = self._get_legal_speed()
+            self.trip_duration_hours = self.route_distance_miles / legal_speed
+            print(f"Stationary mode: Using legal speed {legal_speed} mph for duration calculation")
+        else:
+            self.trip_duration_hours = self.route_distance_miles / avg_speed_mph
         
         # Generate VINs for all vehicles
         self.vins = [self._generate_vin() for _ in range(num_vehicles)]
+    
+    def _get_legal_speed(self) -> float:
+        """Get default legal speed based on start and end locations"""
+        # Check if interstate (different states)
+        start_state = self.start_location.split(',')[-1].strip()
+        end_state = self.end_location.split(',')[-1].strip()
         
+        if start_state != end_state:
+            # Interstate travel - use highway speed
+            return 65.0
+        else:
+            # Intrastate travel - use state road speed
+            return 55.0
+    
     def _get_coordinates(self, location: str) -> Tuple[float, float]:
         """Get coordinates for a location string"""
         location_full = f"{location}, USA"
@@ -194,11 +215,18 @@ class TPMSSimulator:
         trip_duration_min = self.trip_duration_hours * 60
         num_points = int(trip_duration_min / self.update_interval_min) + 1
         
-        # Generate interpolated coordinates for the trip
-        lat_points = np.linspace(self.start_coords[0], self.end_coords[0], num_points)
-        lon_points = np.linspace(self.start_coords[1], self.end_coords[1], num_points)
+        # Generate interpolated coordinates for the trip (or fixed for stationary)
+        if self.stationary_mode:
+            # Vehicle stays at start location
+            lat_points = [self.start_coords[0]] * num_points
+            lon_points = [self.start_coords[1]] * num_points
+        else:
+            # Vehicle moves from start to end
+            lat_points = np.linspace(self.start_coords[0], self.end_coords[0], num_points)
+            lon_points = np.linspace(self.start_coords[1], self.end_coords[1], num_points)
         
         current_time = start_time
+        gps_output_counter = 0  # Counter for GPS output frequency
         
         for i in range(num_points):
             read_at = current_time
@@ -213,23 +241,35 @@ class TPMSSimulator:
             
             # Generate tire pressure and temperature records
             for pos in wheel_positions:
-                # Simulate pressure changes (small variations)
-                pressure_variation = random.uniform(-0.5, 0.5)
-                wheel_pressures[pos] = max(
-                    self.pressure_range[0], 
-                    min(self.pressure_range[1], 
-                        wheel_pressures[pos] + pressure_variation)
-                )
-                
-                # Simulate temperature increase during driving
-                # Temperature rises more at the beginning and stabilizes
-                temp_rise = 10 * (1 - np.exp(-3 * progress))  # Asymptotic rise to ~10°F
-                temp_variation = random.uniform(-1, 1)
-                wheel_temps[pos] = self.avg_temp_f + temp_rise + temp_variation
-                
-                # Add noise to rear wheels (they typically run slightly hotter)
-                if pos[0] in ['2', '3', '4', '5']:  # Rear wheels
-                    wheel_temps[pos] += random.uniform(0, 2)
+                if self.stationary_mode:
+                    # Stationary mode: minimal pressure variation, no temperature change
+                    pressure_variation = random.uniform(-0.2, 0.2)  # Smaller variation
+                    wheel_pressures[pos] = max(
+                        self.pressure_range[0], 
+                        min(self.pressure_range[1], 
+                            wheel_pressures[pos] + pressure_variation)
+                    )
+                    # Temperature stays constant (minor variations only)
+                    wheel_temps[pos] = self.avg_temp_f + random.uniform(-1, 1)
+                else:
+                    # Moving mode: normal variations
+                    # Simulate pressure changes (small variations)
+                    pressure_variation = random.uniform(-0.5, 0.5)
+                    wheel_pressures[pos] = max(
+                        self.pressure_range[0], 
+                        min(self.pressure_range[1], 
+                            wheel_pressures[pos] + pressure_variation)
+                    )
+                    
+                    # Simulate temperature increase during driving
+                    # Temperature rises more at the beginning and stabilizes
+                    temp_rise = 10 * (1 - np.exp(-3 * progress))  # Asymptotic rise to ~10°F
+                    temp_variation = random.uniform(-1, 1)
+                    wheel_temps[pos] = self.avg_temp_f + temp_rise + temp_variation
+                    
+                    # Add noise to rear wheels (they typically run slightly hotter)
+                    if pos[0] in ['2', '3', '4', '5']:  # Rear wheels
+                        wheel_temps[pos] += random.uniform(0, 2)
                 
                 # Pressure record
                 records.append({
@@ -253,26 +293,29 @@ class TPMSSimulator:
                     'ingested_at': ingested_at
                 })
             
-            # Add GPS records
-            records.append({
-                'tenant': self.tenant,
-                'sensor_id': 'latitude',
-                'vin': vin,
-                'read_at': read_at,
-                'trigger': '',
-                'reading': round(current_lat, 6),
-                'ingested_at': ingested_at
-            })
-            
-            records.append({
-                'tenant': self.tenant,
-                'sensor_id': 'longitude',
-                'vin': vin,
-                'read_at': read_at,
-                'trigger': '',
-                'reading': round(current_lon, 6),
-                'ingested_at': ingested_at
-            })
+            # Add GPS records every 2 pressure/temperature updates
+            # Counter increments each time we process all wheels
+            gps_output_counter += 1
+            if gps_output_counter % 2 == 1:  # Output GPS on 1st, 3rd, 5th... iterations (1-indexed)
+                records.append({
+                    'tenant': self.tenant,
+                    'sensor_id': 'latitude',
+                    'vin': vin,
+                    'read_at': read_at,
+                    'trigger': '',
+                    'reading': round(current_lat, 6),
+                    'ingested_at': ingested_at
+                })
+                
+                records.append({
+                    'tenant': self.tenant,
+                    'sensor_id': 'longitude',
+                    'vin': vin,
+                    'read_at': read_at,
+                    'trigger': '',
+                    'reading': round(current_lon, 6),
+                    'ingested_at': ingested_at
+                })
             
             # Advance time
             current_time += timedelta(minutes=self.update_interval_min)
@@ -282,11 +325,18 @@ class TPMSSimulator:
     def generate_dataset(self) -> pd.DataFrame:
         """Generate complete dataset for all vehicles"""
         print(f"Generating TPMS data for {self.num_vehicles} vehicles...")
+        if self.stationary_mode:
+            print(f"Mode: STATIONARY (vehicles remain at {self.start_location})")
+            legal_speed = self._get_legal_speed()
+            print(f"Legal speed for duration calculation: {legal_speed} mph")
+        else:
+            print(f"Mode: MOVING (speed: {self.avg_speed_mph} mph)")
         print(f"Route: {self.start_location} to {self.end_location}")
         print(f"Distance: {self.route_distance_miles:.2f} miles")
-        print(f"Trip duration: {self.trip_duration_hours:.2f} hours")
+        print(f"Duration for data generation: {self.trip_duration_hours:.2f} hours")
         print(f"Vehicle type: {self.vehicle_type}")
         print(f"Number of wheels per vehicle: {self.num_wheels}")
+        print(f"GPS output frequency: Every {self.update_interval_min * 2} minutes")
         
         all_records = []
         start_time = datetime.now().replace(microsecond=0, second=0)
@@ -312,7 +362,8 @@ class TPMSSimulator:
         """Save DataFrame to Parquet file"""
         if filename is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'tpms_data_{timestamp}.parquet'
+            mode_suffix = 'stationary' if self.stationary_mode else 'moving'
+            filename = f'tpms_data_{mode_suffix}_{timestamp}.parquet'
         
         # Ensure data types match ClickHouse schema
         df['tenant'] = df['tenant'].astype(str)
@@ -325,6 +376,13 @@ class TPMSSimulator:
         df.to_parquet(filename, engine='pyarrow', compression='snappy', index=False)
         print(f"Data saved to {filename}")
         print(f"Total records: {len(df)}")
+        
+        # Show GPS record statistics
+        gps_records = df[df['sensor_id'].isin(['latitude', 'longitude'])]
+        pressure_records = df[df['sensor_id'].str.contains('pressure')]
+        print(f"Pressure/Temperature records: {len(pressure_records)}")
+        print(f"GPS records: {len(gps_records)}")
+        print(f"Ratio: 1 GPS pair per {len(pressure_records) / (len(gps_records) / 2):.1f} pressure readings")
         
         return filename
 
@@ -341,7 +399,7 @@ def main():
     parser.add_argument('--end', type=str, required=True,
                        help='Ending location (format: "City, State")')
     parser.add_argument('--speed', type=float, required=True,
-                       help='Average speed in mph')
+                       help='Average speed in mph (0 for stationary mode)')
     parser.add_argument('--temp', type=float, required=True,
                        help='Average ambient temperature in Fahrenheit')
     parser.add_argument('--type', type=str, required=True, 
